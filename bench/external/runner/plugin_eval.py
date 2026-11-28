@@ -76,15 +76,20 @@ def _score_one(
     label: str, cmd: list[str], cwd: Path, env: dict[str, str], timeout: int, out: Path
 ) -> dict[str, Any]:
     record: dict[str, Any] = {"label": label, "command": cmd}
+    stem = label.replace("/", "_").replace(".", "_")
     try:
         proc = _exec(cmd, cwd, env, timeout)
     except subprocess.TimeoutExpired as exc:
-        record.update(exit_code=TIMEOUT_EXIT_CODE, timed_out=True)
-        stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-        record["stderr_tail"] = stderr[-2000:]
+        # output_complete is False when the bounded drain after the kill expired.
+        record.update(exit_code=TIMEOUT_EXIT_CODE, timed_out=True, output_complete=getattr(exc, "output_complete", True))
+        stdout, stderr = _text(exc.output), _text(exc.stderr)
+        record.update(stderr_tail=stderr[-2000:], stdout_tail=stdout[-2000:])
+        _save(out, stem, stdout, stderr)
         return record
     record["exit_code"] = proc.returncode
     record["stderr_tail"] = proc.stderr[-2000:]
+    # Raw output is saved before parsing, so a later error cannot lose it.
+    _save(out, stem, proc.stdout, proc.stderr)
     try:
         parsed = _parse_json(proc.stdout)
         record["result"] = parsed
@@ -95,10 +100,16 @@ def _score_one(
     except ValueError as exc:
         record["parse_error"] = str(exc)
         record["stdout_tail"] = proc.stdout[-2000:]
-    stem = label.replace("/", "_").replace(".", "_")
-    (out / f"{stem}.stdout.json").write_text(proc.stdout, encoding="utf-8")
-    (out / f"{stem}.stderr.txt").write_text(proc.stderr, encoding="utf-8")
     return record
+
+
+def _text(data: str | bytes | None) -> str:
+    return data.decode(errors="replace") if isinstance(data, bytes) else (data or "")
+
+
+def _save(out: Path, stem: str, stdout: str, stderr: str) -> None:
+    (out / f"{stem}.stdout.json").write_text(stdout, encoding="utf-8")
+    (out / f"{stem}.stderr.txt").write_text(stderr, encoding="utf-8")
 
 
 def run(args: argparse.Namespace) -> int:
@@ -143,7 +154,7 @@ def run(args: argparse.Namespace) -> int:
             try:
                 proc = _exec(sync, plugin_eval_dir, sync_env, args.sync_timeout)
             except subprocess.TimeoutExpired as exc:
-                summary["sync"]["timed_out"] = True
+                summary["sync"].update(timed_out=True, stderr_tail=_text(exc.stderr)[-2000:])
                 raise SystemExit(f"uv sync timed out after {args.sync_timeout}s") from exc
             summary["sync"].update(exit_code=proc.returncode, stderr_tail=proc.stderr[-2000:])
             (out / "sync.stdout.txt").write_text(proc.stdout, encoding="utf-8")
@@ -153,11 +164,16 @@ def run(args: argparse.Namespace) -> int:
         for label, cmd in commands:
             current = {"label": label, "command": cmd}
             not_run.remove(label)
-            results.append(_score_one(label, cmd, plugin_eval_dir, env, args.timeout, out))
+            # The per-command boundary: an unexpected error fails only this record. SystemExit
+            # (no uv binary) still aborts, because every later command would fail the same way.
+            try:
+                results.append(_score_one(label, cmd, plugin_eval_dir, env, args.timeout, out))
+            except Exception as exc:
+                results.append({**current, "exit_code": None, "error": f"{type(exc).__name__}: {exc}"})
         current = None
         summary["complete"] = True
     except BaseException as exc:
-        summary["error"] = str(exc.code) if isinstance(exc, SystemExit) else f"{type(exc).__name__}: {exc}"
+        summary["error"] = str(exc) if isinstance(exc, SystemExit) else f"{type(exc).__name__}: {exc}"
         summary["aborted_command"] = current
         raise
     finally:

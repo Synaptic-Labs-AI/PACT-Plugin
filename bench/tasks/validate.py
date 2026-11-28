@@ -8,8 +8,9 @@ A task is valid only when:
     hidden tests pass, and keeps seed tests green.
 
 Every task is validated and reported; the exit code is 1 if any task failed.
-Git runs hermetically (no global/system config, no hooks), so host settings
-cannot change the result.
+Git runs hermetically (no global/system config, no hooks, no inherited GIT_*),
+and child pytest gets no PYTEST_* or PYTHONPATH, so host settings cannot change
+the result. Any error in one task becomes that task's fail row.
 """
 from __future__ import annotations
 
@@ -17,12 +18,15 @@ import argparse
 import json
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+# Run directly (python bench/tasks/validate.py), bench/ is not on sys.path yet.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from external.runner import prepare  # noqa: E402
 
 REQUIRED_FIELDS = (
     "schema",
@@ -59,34 +63,27 @@ class TaskInvalid(SystemExit):
 
 def _child_env() -> dict[str, str]:
     # Inherited GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE would redirect commits into another repo.
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    env.pop("PYTEST_ADDOPTS", None)
+    # PYTEST_* (ADDOPTS, PLUGINS) and PYTHONPATH would change what the child pytest runs.
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("GIT_", "PYTEST_")) and key != "PYTHONPATH"
+    }
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env.update(GIT_ENV)
     return env
 
 
 def _run(cmd: list[str], cwd: Path, task_id: str, timeout: int) -> subprocess.CompletedProcess[str]:
-    """Run cmd in its own process group, so a timeout also kills its grandchildren."""
+    """Run cmd in its own process group; a timeout or signal kills its grandchildren too."""
     try:
-        proc = subprocess.Popen(
-            cmd, cwd=str(cwd), env=_child_env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, start_new_session=True,
+        return prepare.run_process_group(
+            cmd, timeout, cwd=str(cwd), env=_child_env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
     except OSError as exc:
         raise TaskInvalid(f"{task_id}: cannot run {cmd[0]!r}: {exc}") from exc
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-    except BaseException as exc:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.communicate()
-        if isinstance(exc, subprocess.TimeoutExpired):
-            raise TaskInvalid(f"{task_id}: {' '.join(cmd)} timed out after {timeout}s") from exc
-        raise
-    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    except subprocess.TimeoutExpired as exc:
+        raise TaskInvalid(f"{task_id}: {' '.join(cmd)} timed out after {timeout}s") from exc
 
 
 def _git(args: list[str], work: Path, task_id: str, timeout: int) -> subprocess.CompletedProcess[str]:
@@ -108,10 +105,7 @@ def _load_meta(task_dir: Path) -> dict[str, Any]:
     meta_path = task_dir / "task.json"
     if not meta_path.is_file():
         raise TaskInvalid(f"{task_dir.name}: missing task.json")
-    try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise TaskInvalid(f"{task_dir.name}: task.json is not valid JSON: {exc}") from exc
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
     missing = [field for field in REQUIRED_FIELDS if field not in meta]
     if missing:
         raise TaskInvalid(f"{task_dir.name}: missing task.json fields: {missing}")
@@ -136,10 +130,7 @@ def validate_task(task_dir: Path, python: str) -> dict[str, Any]:
     for path, label in ((fixture, "fixture"), (hidden, "hidden_tests"), (gold, "gold_patch"), (prompt, "prompt"), (rubric, "rubric")):
         if not path.exists():
             raise TaskInvalid(f"{task_id}: missing {label}: {path}")
-    try:
-        _check_in_temp(task_id, fixture, hidden, gold, python, timeout)
-    except OSError as exc:
-        raise TaskInvalid(f"{task_id}: {exc}") from exc
+    _check_in_temp(task_id, fixture, hidden, gold, python, timeout)
     return {
         "id": meta["id"],
         "path": str(task_dir),
@@ -227,10 +218,14 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("no tasks found")
     results: list[dict[str, Any]] = []
     for target in targets:
+        # The per-task boundary: any error in one task (bad JSON or encoding, a wrong field
+        # type, an OSError, a failed check) becomes that task's fail row; the run goes on.
         try:
             results.append(validate_task(target, args.python))
-        except TaskInvalid as exc:
-            results.append({"id": _task_id(target), "path": str(target), "status": "fail", "error": str(exc)})
+        except (TaskInvalid, Exception) as exc:
+            task_id = _task_id(target)
+            error = str(exc) if isinstance(exc, TaskInvalid) else f"{task_id}: {type(exc).__name__}: {exc}"
+            results.append({"id": task_id, "path": str(target), "status": "fail", "error": error})
     print(json.dumps({"schema": "pact-bench/task-validation/1", "tasks": results}, indent=2))
     return 0 if all(item["status"] == "pass" for item in results) else 1
 

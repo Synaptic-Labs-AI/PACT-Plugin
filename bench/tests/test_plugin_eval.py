@@ -15,6 +15,10 @@ import json, os, sys, time
 args = sys.argv[1:]
 if args[0] == "sync":
     open({log!r}, "w").write(json.dumps({{"token": "ANTHROPIC_AUTH_TOKEN" in os.environ}}))
+    if os.environ.get("FAKE_SYNC_SLEEP"):
+        sys.stderr.write("sync-marker\\n")
+        sys.stderr.flush()
+        time.sleep(10)
     sys.exit(int(os.environ.get("FAKE_SYNC_RC", "0")))
 name = os.path.basename(args[3])
 if name == "nullayers":
@@ -32,6 +36,9 @@ elif name == "bad":
     print(json.dumps({{"composite": 0}}))
     sys.exit(3)
 elif name == "slow":
+    print("partial-out", flush=True)
+    sys.stderr.write("late-marker\\n")
+    sys.stderr.flush()
     time.sleep(10)
 else:
     print("log line")
@@ -163,7 +170,11 @@ def test_timeout_kills_grandchildren(tmp_path: Path) -> None:
         ("nonjson", lambda r: r["exit_code"] == 0 and "parse_error" in r),
         ("scalar", lambda r: r["exit_code"] == 0 and "parse_error" in r),
         ("bad", lambda r: r["exit_code"] == 3),
-        ("slow", lambda r: r["exit_code"] == 124 and r["timed_out"] is True),
+        (
+            "slow",
+            lambda r: r["exit_code"] == 124 and r["timed_out"] is True
+            and "late-marker" in r["stderr_tail"] and "partial-out" in r["stdout_tail"],
+        ),
     ],
 )
 def test_run_failing_command_returns_one_and_keeps_every_record(tmp_path: Path, skill: str, check) -> None:
@@ -199,6 +210,45 @@ def test_run_failed_sync_is_recorded(tmp_path: Path) -> None:
     assert summary["sync"]["exit_code"] == 5
     assert summary["aborted_command"]["label"] == "sync"
     assert summary["not_run"] == [str(manifest.parent / "pact-plugin"), "good"]
+
+
+def test_run_sync_timeout_records_its_output(tmp_path: Path) -> None:
+    manifest, tool, uv, skills = _setup(tmp_path, ["good"])
+    settings = manifest.parent / "config" / "settings.json"
+    settings.write_text(json.dumps({"env": {"FAKE_SYNC_SLEEP": "1"}}), encoding="utf-8")
+    with pytest.raises(SystemExit, match="uv sync timed out"):
+        plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills), "--sync-timeout", "1"))
+    sync = _result(manifest)["sync"]
+    assert sync["timed_out"] is True
+    assert "sync-marker" in sync["stderr_tail"]
+
+
+def test_unexpected_error_fails_only_its_command(tmp_path: Path) -> None:
+    long_name = "x" * 300  # its output file name exceeds NAME_MAX, so saving raises OSError
+    manifest, tool, uv, skills = _setup(tmp_path, [long_name, "good"])
+    assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills))) == 1
+    summary = _result(manifest)
+    records = {r["label"]: r for r in summary["results"]}
+    assert records[long_name]["exit_code"] is None
+    assert records[long_name]["error"].startswith("OSError")
+    assert records["good"]["exit_code"] == 0
+    assert summary["complete"] is True
+
+
+def test_signal_aborts_the_run_and_is_recorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manifest, tool, uv, skills = _setup(tmp_path, ["good"])
+
+    def terminated(*_args: object) -> None:
+        raise plugin_eval.prepare.SignalExit(15)
+
+    monkeypatch.setattr(plugin_eval, "_exec", terminated)
+    with pytest.raises(SystemExit) as exc:
+        plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills), "--skip-sync"))
+    assert exc.value.code == 143
+    summary = _result(manifest)
+    assert summary["error"] == "terminated by SIGTERM"
+    assert summary["complete"] is False
+    assert summary["aborted_command"]["label"] == str(manifest.parent / "pact-plugin")
 
 
 def test_skills_file_expands_user(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -125,9 +125,17 @@ def test_hooks_path_is_disabled_against_inherited_git_c(tmp_path: Path, monkeypa
     assert validate.validate_task(make_task(tmp_path / "t"), sys.executable)["status"] == "pass"
 
 
-def test_pytest_addopts_does_not_leak(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PYTEST_ADDOPTS", "--no-such-pytest-flag")
-    assert validate.validate_task(make_task(tmp_path), sys.executable)["status"] == "pass"
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("PYTEST_ADDOPTS", "--no-such-pytest-flag"), ("PYTEST_PLUGINS", "no_such_plugin_module"), ("PYTHONPATH", "shadow")],
+)
+def test_live_python_env_does_not_leak(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> None:
+    if name == "PYTHONPATH":
+        # A pytest module earlier on PYTHONPATH would replace the real one.
+        _write(tmp_path / "shadow" / "pytest.py", "raise SystemExit(3)\n")
+        value = str(tmp_path / "shadow")
+    monkeypatch.setenv(name, value)
+    assert validate.validate_task(make_task(tmp_path / "t"), sys.executable)["status"] == "pass"
 
 
 BROKEN = {
@@ -200,14 +208,61 @@ def test_validator_rejects_broken_task(tmp_path: Path, case: str) -> None:
 
 
 def test_main_reports_every_task_and_fails_if_any_failed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    make_task(tmp_path, "a_bad", gold="")
+    make_task(tmp_path, "a_bad", gold="", meta={"id": "a-bad-id"})
     (make_task(tmp_path, "b_copy_error") / "fixture" / "dangling").symlink_to(tmp_path / "missing")
     make_task(tmp_path, "c_good")
     assert validate.main(["--root", str(tmp_path)]) == 1
     tasks = json.loads(capsys.readouterr().out)["tasks"]
-    assert [(t["id"], t["status"]) for t in tasks] == [("a_bad", "fail"), ("b_copy_error", "fail"), ("c_good", "pass")]
-    assert "a_bad" in tasks[0]["error"]
+    # The fail row carries task.json's id even when it differs from the directory name.
+    assert [(t["id"], t["status"]) for t in tasks] == [("a-bad-id", "fail"), ("b_copy_error", "fail"), ("c_good", "pass")]
+    assert "a-bad-id" in tasks[0]["error"]
     assert "b_copy_error" in tasks[1]["error"]
+
+
+def _raw(text: bytes):
+    def write(task: Path) -> None:
+        (task / "task.json").write_bytes(text)
+
+    return write
+
+
+def _raise_in_check(monkeypatch: pytest.MonkeyPatch):
+    real = validate._check_in_temp
+
+    def check(task_id: str, *args: Any) -> None:
+        if task_id == "bad-id":
+            raise LookupError("unexpected")
+        real(task_id, *args)
+
+    monkeypatch.setattr(validate, "_check_in_temp", check)
+
+
+# (make_task overrides, post-write hook, expected fail-row id, expected error fragment)
+BAD_INPUTS = {
+    "non_utf8_task_json": ({}, _raw(b'{"id": "\xff"}'), "a_bad", "UnicodeDecodeError"),
+    "unparseable_task_json": ({}, _raw(b"{"), "a_bad", "JSONDecodeError"),
+    "task_json_not_an_object": ({}, _raw(b"7"), "a_bad", "TypeError"),
+    "non_string_path_field": ({"meta": {"id": "bad-id", "fixture": 5}}, None, "bad-id", "TypeError"),
+    "unexpected_exception": ({"meta": {"id": "bad-id"}}, "check", "bad-id", "LookupError: unexpected"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(BAD_INPUTS))
+def test_one_bad_task_fails_only_itself(
+    tmp_path: Path, case: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    kwargs, hook, expected_id, fragment = BAD_INPUTS[case]
+    bad = make_task(tmp_path, "a_bad", **kwargs)
+    if hook == "check":
+        _raise_in_check(monkeypatch)
+    elif hook:
+        hook(bad)
+    make_task(tmp_path, "b_good")
+    assert validate.main(["--root", str(tmp_path)]) == 1
+    tasks = json.loads(capsys.readouterr().out)["tasks"]
+    assert [(t["id"], t["status"]) for t in tasks] == [(expected_id, "fail"), ("b_good", "pass")]
+    assert fragment in tasks[0]["error"]
+    assert tasks[0]["error"].startswith(expected_id + ":")
 
 
 def _git_count(repo: Path) -> int:
