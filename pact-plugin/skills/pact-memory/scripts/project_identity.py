@@ -601,7 +601,8 @@ def _valid_host(host: str) -> bool:
 def _ipv6_host(host: str) -> Optional[str]:
     """A bracketed IPv6 literal (`[2001:db8::1]`) in its one compressed,
     bracketed spelling, or None. A zone index (`%eth0`) is machine-local and
-    declines, as do an IPv4-mapped literal and anything `ipaddress` refuses."""
+    declines, as do an IPv4-mapped literal, an IPv4-compatible loopback
+    literal and anything `ipaddress` refuses."""
     import ipaddress
 
     if not (host.startswith("[") and host.endswith("]")) or "%" in host:
@@ -614,6 +615,11 @@ def _ipv6_host(host: str) -> Optional[str]:
     # host that has a second, unbracketed spelling, so one server would get
     # two ids.
     if address.ipv4_mapped is not None:
+        return None
+    # AN IPv4-COMPATIBLE LOOPBACK LITERAL (`[::127.0.0.1]`, the deprecated
+    # `::a.b.c.d` form) reaches this machine as `127.0.0.1` does, so it
+    # declines with the loopback literals below.
+    if int(address) >> 32 == 0 and ipaddress.IPv4Address(int(address)).is_loopback:
         return None
     # A LOOPBACK OR UNSPECIFIED LITERAL (`[::1]`, `[::]`) reaches this
     # machine, as `localhost` does (`_reserved_host`), so it declines.

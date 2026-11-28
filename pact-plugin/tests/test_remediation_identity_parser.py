@@ -3409,3 +3409,19 @@ def test_the_git_dir_of_a_checkout_named_repo_git_is_repos_id(url):
     from scripts.project_identity import normalize_remote_url
 
     assert normalize_remote_url(url) == "h.example/o/r"
+
+
+@pytest.mark.parametrize("host, expected", [
+    ("[::127.0.0.1]", None), ("[::7f00:1]", None), ("[::127.1.2.3]", None),
+    ("[::ffff:127.0.0.1]", None),
+    ("[::192.0.2.1]", "[::c000:201]/o/r"), ("[::2]", "[::2]/o/r"),
+])
+def test_an_ipv4_in_ipv6_loopback_literal_declines(host, expected):
+    """`::127.0.0.1` (IPv4-compatible) and `::ffff:127.0.0.1` (IPv4-mapped)
+    reach this machine as `127.0.0.1` does, so they decline with the other
+    loopback spellings; an IPv4-compatible literal of another address keeps
+    its id. RED WHEN `[::127.0.0.1]` gives `[::7f00:1]/o/r`."""
+    from scripts.project_identity import normalize_remote_url
+
+    assert normalize_remote_url(f"https://{host}/o/r") == expected
+    assert normalize_remote_url(f"ssh://git@{host}/o/r") == expected
