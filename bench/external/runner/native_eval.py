@@ -35,7 +35,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
 import stat
 import subprocess
@@ -56,7 +55,6 @@ REPORT_FILES = {"report_json": "report.json", "report_html": "report.html"}
 # Tools claude plugin eval treats as gated (its --help); mcp__* tools are gated too.
 GATED_TOOLS = ("Bash", "Write", "Edit", "WebFetch")
 CASE_FILES = ("prompt.md", "case.yaml")
-ALLOWED_TOOLS_LINE = re.compile(r"^allowed_tools:\s*\[(.*)\]\s*$", re.MULTILINE)
 
 
 def _default_cases() -> Path:
@@ -96,28 +94,81 @@ def _child_env(manifest: dict[str, Any], scratch: Path) -> dict[str, str]:
     )
 
 
+def _case_dirs(cases_dir: Path) -> list[Path]:
+    """Every case dir claude plugin eval would discover: any dir under cases_dir,
+    at any depth, holding a case.yaml or a prompt.md."""
+    found = {path.parent for name in CASE_FILES for path in cases_dir.rglob(name) if path.is_file()}
+    return sorted(found)
+
+
+def _front_matter(text: str) -> str | None:
+    """The YAML between a leading '---' line and the next '---' line, else None."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return "\n".join(lines[1:index])
+    raise SystemExit("front matter opened with '---' is never closed")
+
+
+def _split_scalar(value: str) -> list[str]:
+    """A comma-separated scalar, split at commas outside Tool(...) patterns."""
+    entries, depth, current = [], 0, ""
+    for char in value:
+        depth += {"(": 1, ")": -1}.get(char, 0)
+        if char == "," and depth == 0:
+            entries.append(current)
+            current = ""
+        else:
+            current += char
+    return [entry.strip() for entry in [*entries, current] if entry.strip()]
+
+
+def _allowed_tools(source: Path) -> list[str]:
+    """allowed_tools from a case.yaml or a prompt.md's front matter: a list of
+    strings or a single (comma-separated) string; absent means none."""
+    try:
+        import yaml
+    except ImportError as exc:
+        raise SystemExit("native-eval needs PyYAML to read case allowed_tools (it is in bench/constraints.txt)") from exc
+    text = source.read_text(encoding="utf-8")
+    try:
+        body = text if source.name == "case.yaml" else _front_matter(text)
+        data = yaml.safe_load(body) if body else None
+    except (SystemExit, yaml.YAMLError) as exc:
+        raise SystemExit(f"{source}: cannot read its YAML: {exc}") from exc
+    if data is None:
+        return []
+    if not isinstance(data, dict):
+        raise SystemExit(f"{source}: expected a YAML mapping, got {type(data).__name__}")
+    value = data.get("allowed_tools")
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return _split_scalar(value)
+    if isinstance(value, list) and all(isinstance(entry, str) for entry in value):
+        return [entry.strip() for entry in value if entry.strip()]
+    raise SystemExit(f"{source}: allowed_tools must be a list of names or a single string, got {value!r}")
+
+
 def case_tool_grants(cases_dir: Path) -> list[str]:
     """The gated tools (GATED_TOOLS, mcp__*, and their Tool(pattern) forms) that some
-    case's own allowed_tools lists, in first-seen order.
+    case's own allowed_tools lists, in first-seen order over the discovered cases.
 
     In claude plugin eval a gated tool is usable only when it is in the case's
     allowed_tools AND granted with --allow-tools, so granting this union adds no
     tool to a case that does not list it, and a run whose cases list none grants nothing.
     """
     grants: list[str] = []
-    for case in sorted(path for path in cases_dir.iterdir() if path.is_dir()):
+    for case in _case_dirs(cases_dir):
         for name in CASE_FILES:
-            source = case / name
-            if not source.is_file():
+            if not (case / name).is_file():
                 continue
-            text = source.read_text(encoding="utf-8")
-            if re.search(r"^allowed_tools:\s*$", text, re.MULTILINE):
-                raise SystemExit(f"{source}: allowed_tools must be an inline [..] list for native-eval to read it")
-            for match in ALLOWED_TOOLS_LINE.finditer(text):
-                for entry in (item.strip().strip("'\"") for item in match.group(1).split(",")):
-                    base = entry.split("(", 1)[0]
-                    if entry and (base in GATED_TOOLS or base.startswith("mcp__")) and entry not in grants:
-                        grants.append(entry)
+            for entry in _allowed_tools(case / name):
+                base = entry.split("(", 1)[0]
+                if (base in GATED_TOOLS or base.startswith("mcp__")) and entry not in grants:
+                    grants.append(entry)
     return grants
 
 

@@ -478,10 +478,56 @@ def test_grants_keep_patterns_and_mcp_tools_and_skip_ungated(tmp_path: Path) -> 
     assert native_eval.case_tool_grants(tmp_path) == ["Bash(npm test)", "mcp__srv__tool", "WebFetch"]
 
 
-def test_a_block_list_allowed_tools_is_refused(tmp_path: Path, short_root: Path) -> None:
+@pytest.mark.parametrize(
+    ("frontmatter", "expected"),
+    [
+        ("allowed_tools:\n  - Read\n  - Bash\n", ["Bash"]),  # block list
+        ("allowed_tools: [Read,\n  Write,\n  Edit]\n", ["Write", "Edit"]),  # flow list over several lines
+        ("allowed_tools: Bash\n", ["Bash"]),  # bare scalar
+        ("allowed_tools: Read, Bash(npm run a, b), WebFetch\n", ["Bash(npm run a, b)", "WebFetch"]),  # comma scalar
+        ("description: no tools here\n", []),  # absent
+        ("allowed_tools:\n", []),  # empty value
+    ],
+    ids=["block_list", "multiline_flow", "bare_scalar", "comma_scalar", "absent", "empty"],
+)
+def test_allowed_tools_shapes_the_cli_accepts(tmp_path: Path, frontmatter: str, expected: list[str]) -> None:
+    _case(tmp_path, "c", frontmatter)
+    assert native_eval.case_tool_grants(tmp_path) == expected
+
+
+def test_nested_case_dirs_and_case_yaml_are_read(tmp_path: Path) -> None:
+    _case(tmp_path / "group", "deep", "allowed_tools: [Edit]\n")
+    (tmp_path / "yaml-only").mkdir()
+    (tmp_path / "yaml-only" / "case.yaml").write_text("name: y\nallowed_tools: [WebFetch]\n", encoding="utf-8")
+    assert native_eval.case_tool_grants(tmp_path) == ["Edit", "WebFetch"]
+
+
+@pytest.mark.parametrize(
+    "frontmatter",
+    ["allowed_tools: {Bash: true}\n", "allowed_tools: 7\n", "allowed_tools: [Bash, 3]\n", "allowed_tools: [unclosed\n"],
+    ids=["mapping", "number", "non_string_entry", "invalid_yaml"],
+)
+def test_an_invalid_allowed_tools_is_refused_and_recorded(
+    tmp_path: Path, short_root: Path, frontmatter: str
+) -> None:
     manifest, _cases, _plugin = _prepared(tmp_path)
-    cases = tmp_path / "block-cases"
-    _case(cases, "c", "allowed_tools:\n  - Bash\n")
-    with pytest.raises(SystemExit, match="inline"):
+    cases = tmp_path / "bad-cases"
+    _case(cases, "c", frontmatter)
+    with pytest.raises(SystemExit, match="allowed_tools must be|cannot read its YAML"):
         native_eval.run(_args(manifest, cases, _fake_claude(tmp_path), short_root))
-    assert "inline" in _result(manifest)["error"]
+    assert _result(manifest)["error"]
+    assert _leftovers(short_root) == []
+
+
+def test_an_unclosed_front_matter_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "c").mkdir()
+    (tmp_path / "c" / "prompt.md").write_text("---\nallowed_tools: [Bash]\nno closing line\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="never closed"):
+        native_eval.case_tool_grants(tmp_path)
+
+
+def test_a_missing_yaml_library_is_a_clear_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _case(tmp_path, "c", "allowed_tools: [Bash]\n")
+    monkeypatch.setitem(sys.modules, "yaml", None)  # makes "import yaml" raise ImportError
+    with pytest.raises(SystemExit, match="needs PyYAML"):
+        native_eval.case_tool_grants(tmp_path)
