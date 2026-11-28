@@ -2715,3 +2715,30 @@ def test_a_bucket_shared_with_another_checkout_offers_no_move_and_refuses_one(
         assert _snapshot(store) == before
     code, envelope = _cli([*argv, "--apply", "--from-another-repository"], capfd)
     assert code == 0 and envelope["result"]["memories"] == 2, envelope
+
+
+def test_a_declined_identity_names_its_folder_name_bucket_and_the_pin(
+    identity_env, store, monkeypatch, capfd, caplog
+):
+    """An origin on this machine declines, so no id resolves and no read sees
+    this checkout's folder-name bucket 'repoL'. The read says the bucket holds
+    its memories and that the pin brings it back into judgment; show labels it
+    this checkout's legacy candidate; and the pin remedy no longer offers
+    CLAUDE_PROJECT_DIR. RED WHEN the bucket is hidden with no notice, or shows
+    as another project's."""
+    import logging
+
+    from scripts import memory_api
+
+    memory_api._DECLINED_BUCKET_WARNED.clear()
+    repo = make_repo(identity_env / "repoL", remote="http://localhost:3000/o/repoL")
+    _seed(store, "repoL", memory_id="old000001", path="a.py")
+    monkeypatch.chdir(repo)
+    with caplog.at_level(logging.WARNING):
+        code, shown = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+    assert code == 0, shown
+    rows = {row["id"]: row for row in shown["result"]["candidates"]}
+    assert (rows["repoL"]["relation"], rows["repoL"]["rekey"]) == ("legacy_candidate", None), rows
+    warned = " ".join(record.getMessage() for record in caplog.records)
+    assert "this checkout's folder-name bucket 'repoL' holds 1 memory" in warned, warned
+    assert "pact-project-id" in warned and "another project root" not in warned, warned

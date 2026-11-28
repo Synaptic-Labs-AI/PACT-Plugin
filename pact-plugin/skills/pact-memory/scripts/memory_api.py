@@ -293,6 +293,8 @@ _CASE_VARIANT_WARNED: set = set()
 _SUBMODULE_SUPPRESSED: set = set()
 # Unproven legacy buckets already disclosed in this process, (store, bucket).
 _UNPROVEN_WARNED: set = set()
+# Folder-name buckets of a declined identity already disclosed, (store, bucket).
+_DECLINED_BUCKET_WARNED: set = set()
 
 
 LEGACY_SCOPE_KEYS = frozenset({
@@ -1387,10 +1389,7 @@ def _decline_remedy(
 
 def _pin_remedy(override_path: Any) -> str:
     """The remedy that writes an operator-chosen id to `override_path`."""
-    return (
-        f"Write an operator-chosen canonical id to {str(override_path)!r}, or "
-        "set CLAUDE_PROJECT_DIR to another project root."
-    )
+    return f"Write an operator-chosen canonical id to {str(override_path)!r}."
 
 
 def _warn_declined(
@@ -1891,6 +1890,7 @@ def project_candidate_rows(
     current_id: Optional[str],
     legacy_state: Optional[Dict[str, Any]],
     earlier: Optional[Dict[str, Optional[str]]] = None,
+    declined_legacy: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """THE ONE CENSUS BUILDER: every non-empty bucket, its relation and remedy.
 
@@ -1919,6 +1919,10 @@ def project_candidate_rows(
             rekey = variant_commands[index] if index < len(variant_commands) else None
         elif bucket_id in earlier:
             relation, rekey = "earlier_id", earlier[bucket_id]
+        elif bucket_id == declined_legacy:
+            # This checkout's own folder-name bucket while its identity
+            # declined: no id resolves to move it into, so no command.
+            relation, rekey = "legacy_candidate", None
         else:
             relation, rekey = "other", None
         rows.append({
@@ -4199,6 +4203,39 @@ class PACTMemory:
             _LEGACY_SCOPE_CACHE[key] = verdict
         return verdict
 
+    def _declined_folder_bucket(self) -> Optional[str]:
+        """This checkout's folder-name bucket when its identity declined for a
+        cause a pin remedies and the bucket holds memories, else None. No read
+        sees that bucket while no id resolves, so it is disclosed once per
+        process with the pin that brings it back into judgment. Never raises:
+        a store that cannot be read answers None."""
+        legacy = self._legacy_project_basename
+        override = (self._decline_reason or {}).get("override_path")
+        if not legacy or override is None:
+            return None
+        store = str(self._db_path or resolve_db_path())
+        try:
+            count = read_project_bucket_census(store).get(legacy, 0)
+        except Exception:  # noqa: BLE001 — a disclosure never fails the read
+            return None
+        if not count:
+            return None
+        key = (store, legacy)
+        if key not in _DECLINED_BUCKET_WARNED and not _LEGACY_NOTICES_QUIET.get():
+            _DECLINED_BUCKET_WARNED.add(key)
+            logger.warning(
+                "this checkout's folder-name bucket %r holds %d memor%s, which no "
+                "read sees while no project id resolves. Writing the canonical id "
+                "that names this repository to %r gives this checkout an id, and "
+                "its reads then judge that bucket as this repository's legacy "
+                "bucket.",
+                legacy,
+                count,
+                "y" if count == 1 else "ies",
+                str(override),
+            )
+        return legacy
+
     def _earlier_canonical_buckets(self, scope: str, conn: Any = None) -> Dict[str, Optional[str]]:
         """{bucket: rekey command} for each CANONICAL bucket other than
         `scope` that has a file row in this checkout linked by a memory saved
@@ -4525,8 +4562,10 @@ class PACTMemory:
         self._legacy_verdict = None
         self._earlier_canonical = {}
         self._read_gate_roots = None
+        self._declined_legacy = None
         scope = self._project_scope()
         if scope is None:
+            self._declined_legacy = self._declined_folder_bucket()
             return ()
         if is_canonical(scope):
             # AN EARLIER CANONICAL ID OF THIS REPOSITORY (an origin renamed,
@@ -7086,6 +7125,7 @@ class PACTMemory:
                 store=str(resolve_db_path()),
                 current_id=self._project_scope(),
                 legacy_state=self._legacy_scope_state,
+                declined_legacy=getattr(self, "_declined_legacy", None),
             )
 
         capabilities = get_search_capabilities()

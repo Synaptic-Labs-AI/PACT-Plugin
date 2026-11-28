@@ -4754,8 +4754,7 @@ _DESCRIBED_PRINTED_CLAUSES = {
     "Run the `project-id show` verb to inspect the detected identity": "names a read-only verb",
     "Set CLAUDE_PROJECT_DIR to an existing project root": "asks for a declaration",
     "The cwd rung declined": _OBSERVED,
-    "Write an operator-chosen canonical id to '/home/u/repo/.git/pact-project-id', "
-    "or set CLAUDE_PROJECT_DIR to another project root":
+    "Write an operator-chosen canonical id to '/home/u/repo/.git/pact-project-id'":
         "names a file to create inside the git directory; the marker is unchanged",
     "X does not exist and no verified worktree identity record names it": _DETAIL,
     "X gave no git dir": _DETAIL,
