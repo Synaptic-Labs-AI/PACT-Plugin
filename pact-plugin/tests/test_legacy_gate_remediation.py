@@ -1502,6 +1502,7 @@ def test_a_github_payload_id_that_is_not_owner_repo_is_refused(canonical_session
     assert code == 2 and envelope["error"] == "INVALID_INPUT", envelope
     assert "names no GitHub repository" in envelope["message"], envelope
     assert "exactly owner/repo" in envelope["message"], envelope
+    assert "starts with a letter or digit and is at most 39 characters" in envelope["message"], envelope
     assert "Note:" not in envelope["message"] and "allowed_fields" not in envelope, envelope
     code, envelope = _cli_err(
         ["update", row, json.dumps({"project_id": payload}), "--db-path", str(store)], capfd,
@@ -1527,7 +1528,7 @@ def test_other_payload_refusals_keep_their_envelope(canonical_session, capfd):
         capfd,
     )
     assert code == 2 and envelope["error"] == "ValueError", envelope
-    assert "Note:" not in envelope["message"], envelope
+    assert "allowed_fields" in envelope and "Note:" not in envelope["message"], envelope
 
 
 _ROW = "0123456789abcdef0123456789abcdef"

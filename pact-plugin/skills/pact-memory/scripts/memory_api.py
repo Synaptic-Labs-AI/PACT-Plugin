@@ -1329,8 +1329,11 @@ def _folded_payload_project(payload_id: Any) -> Any:
     if ":" not in hostport:
         raise GitHubPayloadIdRefusedError(
             f"project_id {payload_id!r} names no GitHub repository: a "
-            "github.com id is exactly owner/repo, each a GitHub name. Nothing "
-            "was written."
+            "github.com id is exactly owner/repo. The owner holds only ASCII "
+            "letters, digits, hyphens and underscores, starts with a letter or "
+            "digit and is at most 39 characters; the repository holds only "
+            "ASCII letters, digits, '.', '-' and '_' and does not end in .git. "
+            "Nothing was written."
         )
     return payload_id
 
