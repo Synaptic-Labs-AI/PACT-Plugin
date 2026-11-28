@@ -1308,13 +1308,15 @@ _REDIRECT_MOVED_REMEDY = (
 
 def _folded_payload_project(payload_id: Any) -> Any:
     """A caller's github.com `project_id` spelled as a pin naming it is
-    (`database.pin_file_value`): owner and repository lower-cased, a
-    port-less `www.` host dropped, so `github.com/Acme/Widget` names the
-    bucket `github.com/acme/widget` that repository's sessions read. A
+    (`database.pin_file_value`): host, owner and repository lower-cased and a
+    port-less `www.` host dropped, so `GitHub.com/Acme/Widget` names the
+    bucket `github.com/acme/widget` that repository's sessions read. A port
+    is kept: an id holds no scheme, so `github.com:443` is the id of an ssh
+    remote on port 443, not of an https one. A
     trailing `.git` is kept, as a pin keeps it, because
     `github.com/o/r.git` is itself an id a remote gives. Any other value,
     and a github.com value no pin may hold, is returned unchanged."""
-    if not isinstance(payload_id, str) or not is_canonical(payload_id):
+    if not isinstance(payload_id, str):
         return payload_id
     host = payload_id.partition("/")[0].partition(":")[0].lower()
     if host not in ("github.com", "www.github.com"):

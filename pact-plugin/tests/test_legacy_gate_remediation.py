@@ -1421,10 +1421,18 @@ def test_a_separate_git_dir_checkout_whose_git_dir_is_named_like_the_bucket_is_a
     assert _evidence(store, NAME, [mine])["foreign_checkout_rows"] == 1
 
 
-@pytest.mark.parametrize("payload", ["github.com/Acme/Widget", "www.github.com/ACME/widget"])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "github.com/Acme/Widget",
+        "www.github.com/ACME/widget",
+        "GitHub.com/ACME/Widget",
+        "WWW.GitHub.com/Acme/Widget",
+    ],
+)
 def test_a_github_payload_id_is_folded_into_the_detected_bucket(canonical_session, payload):
     """A save or update whose project_id spells this repository's github.com
-    id in another case, or with a www host, files under the id its sessions
+    id in another case, host included, or with a www host, files under the id its sessions
     read, so list shows it. RED WHEN the payload id is filed as given, in a
     bucket nothing reads."""
     repo, store = canonical_session
@@ -1437,6 +1445,19 @@ def test_a_github_payload_id_is_folded_into_the_detected_bucket(canonical_sessio
     assert listed.get(saved) == CANONICAL and listed.get(other) == CANONICAL, listed
     with sqlite3.connect(str(store)) as conn:
         assert {row[0] for row in conn.execute("SELECT project_id FROM memories")} == {CANONICAL}
+
+
+@pytest.mark.parametrize("port", ["443", "8443"])
+def test_a_github_payload_id_keeps_its_port(canonical_session, port):
+    """A port is kept, as a pin keeps it: an id holds no scheme, so
+    `github.com:443` is the id of an ssh remote on port 443. RED WHEN the
+    port is dropped or the host keeps its case."""
+    repo, store = canonical_session
+    memory = PACTMemory(session_id="s", db_path=store)
+    memory.save({"context": "a ported id", "project_id": f"GitHub.com:{port}/Acme/Widget"})
+    with sqlite3.connect(str(store)) as conn:
+        filed = {row[0] for row in conn.execute("SELECT project_id FROM memories")}
+    assert filed == {f"github.com:{port}/acme/widget"}, filed
 
 
 def test_a_github_payload_id_keeps_its_git_suffix_as_a_pin_does(canonical_session):

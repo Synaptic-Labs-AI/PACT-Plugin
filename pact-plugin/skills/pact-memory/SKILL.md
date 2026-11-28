@@ -215,7 +215,7 @@ the memory is NOT written.
 | `reasoning_chains` | list | you supply | How key decisions connect — "X because Y, which required Z" |
 | `agreements_reached` | list | you supply | What was verified via teachback or agreement check |
 | `disagreements_resolved` | list | you supply | Where agents disagreed and how it was settled |
-| `project_id` | string | optional | Accepted in the payload; a `github.com` id is spelled as a pin naming it is (owner and repository lower-cased, a `www.` host dropped, a trailing `.git` kept); auto-detected from the environment when you omit it |
+| `project_id` | string | optional | Accepted in the payload; a `github.com` id is spelled as a pin naming it is (host, owner and repository lower-cased, and `www.github.com` with no port becomes `github.com`; a port and a trailing `.git` are kept); auto-detected from the environment when you omit it |
 | `session_id` | string | optional | Accepted in the payload; auto-detected from the environment when you omit it |
 | `files` | list | **never** | Read-only. Returned by `get`/`search`/`list`; REJECTED as a payload key — see below |
 
