@@ -3482,3 +3482,16 @@ def test_any_scheme_git_hands_to_a_helper_is_a_remote_helper(url, outcome):
     from (ftp) and a malformed scheme still decline. RED WHEN an unknown
     helper scheme declines, refusing every save."""
     assert pi.classify_remote_origin(url)[0] == outcome
+
+
+@pytest.mark.parametrize("url", [
+    "http://gitea:3000/o/r.git",
+    "https://github.com/acme/widget",
+    "s3://my-bucket/widget",
+    "/srv/repos/widget",
+])
+def test_no_unrepresentable_reason_for_an_origin_that_does_not_decline(url):
+    """The reason is only ever given for a url that declines. RED WHEN a
+    working remote is given a decline reason."""
+    assert pi.classify_remote_origin(url)[0] != pi.OUTCOME_DECLINE
+    assert pi.unrepresentable_detail(url) is None

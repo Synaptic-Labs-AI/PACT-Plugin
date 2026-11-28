@@ -1323,9 +1323,10 @@ def _is_remote_helper(url: str) -> bool:
 def unrepresentable_detail(url: Optional[str]) -> Optional[str]:
     """Why a network origin declined (`classify_remote_origin`), in words that
     name the rule it broke and never echo the url (a url can carry a token),
-    or None when no more specific reason is found. For the
-    `origin_unrepresentable` cause; diagnostic only, never a verdict."""
-    if not isinstance(url, str):
+    or None when the url does not decline or no more specific reason is
+    found. For the `origin_unrepresentable` cause; diagnostic only, never a
+    verdict."""
+    if not isinstance(url, str) or classify_remote_origin(url)[0] != OUTCOME_DECLINE:
         return None
     value = _strip_one_terminator(url)
     if _has_control_character(value):
